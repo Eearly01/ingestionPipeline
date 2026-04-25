@@ -1,7 +1,7 @@
 Parameters:
   AllowedWebOrigin:
     Type: String
-    Description: Netlify site origin https://eearly-doc-reader.netlify.app
+    Description: Netlify site origin https://eearlyawsdocingestion.netlify.app
 
   PresignExpiresSeconds:
     Type: Number
