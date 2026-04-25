@@ -1,0 +1,286 @@
+Parameters:
+  AllowedWebOrigin:
+    Type: String
+    Description: Netlify site origin https://eearly-doc-reader.netlify.app
+
+  PresignExpiresSeconds:
+    Type: Number
+    Default: 300
+
+  BedrockModelIdOrProfileArn:
+    Type: String
+    Description: Bedrock model ID or application inference profile ARN
+
+  BedrockInvokeResourceArn:
+    Type: String
+    Description: Exact model ARN or inference-profile ARN allowed for InvokeModel
+
+Resources:
+  IngesterBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Ref AllowedWebOrigin
+            AllowedMethods:
+              - PUT
+            AllowedHeaders:
+              - content-type
+              - x-amz-*
+            ExposedHeaders:
+              - ETag
+            MaxAge: 300
+
+  DocumentReaderHttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: document-reader-api
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Ref AllowedWebOrigin
+        AllowMethods:
+          - GET
+          - POST
+          - OPTIONS
+        AllowHeaders:
+          - content-type
+        MaxAge: 300
+
+  DocumentReaderApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      StageName: '$default'
+      AutoDeploy: true
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: 20
+        ThrottlingRateLimit: 10
+
+  PresignRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: PresignPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/uploads/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  StatusRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StatusPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/chatbot-manifests/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  AskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AskPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/chatbot-manifests/*
+                  - !Sub arn:${AWS::Partition}:s3:::${S3BucketName}/chatbot-store/*
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  # add bedrock:InvokeModelWithResponseStream if/when you enable streaming
+                Resource: !Ref BedrockInvokeResourceArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  PresignLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt PresignRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          UPLOAD_BUCKET: !Ref S3BucketName
+          UPLOAD_PREFIX: uploads/
+          PRESIGN_EXPIRES_SECONDS: !Ref PresignExpiresSeconds
+      Code:
+        S3Bucket: your-artifact-bucket
+        S3Key: presign-lambda.zip
+
+  StatusLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt StatusRole.Arn
+      Timeout: 15
+      MemorySize: 128
+      Environment:
+        Variables:
+          DOC_BUCKET: !Ref S3BucketName
+          MANIFEST_PREFIX: chatbot-manifests/
+      Code:
+        S3Bucket: your-artifact-bucket
+        S3Key: status-lambda.zip
+
+  AskLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt AskRole.Arn
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          DOC_BUCKET: !Ref S3BucketName
+          MANIFEST_PREFIX: chatbot-manifests/
+          CHUNK_PREFIX: chatbot-store/
+          MODEL_ID_OR_PROFILE_ARN: !Ref BedrockModelIdOrProfileArn
+          MAX_CONTEXT_TOKENS: '12000'
+      Code:
+        S3Bucket: your-artifact-bucket
+        S3Key: ask-lambda.zip
+
+  PresignIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PresignLambda.Arn}/invocations
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  StatusIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${StatusLambda.Arn}/invocations
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  AskIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AskLambda.Arn}/invocations
+      IntegrationMethod: POST
+      PayloadFormatVersion: '2.0'
+
+  PresignRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      RouteKey: 'POST /presign'
+      AuthorizationType: NONE
+      Target: !Join [ '/', [ integrations, !Ref PresignIntegration ] ]
+
+  StatusRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      RouteKey: 'GET /status/{documentId}'
+      AuthorizationType: NONE
+      Target: !Join [ '/', [ integrations, !Ref StatusIntegration ] ]
+
+  AskRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref DocumentReaderHttpApi
+      RouteKey: 'POST /ask'
+      AuthorizationType: NONE
+      Target: !Join [ '/', [ integrations, !Ref AskIntegration ] ]
+
+  PresignPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PresignLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${DocumentReaderHttpApi}/*/POST/presign
+
+  StatusPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StatusLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${DocumentReaderHttpApi}/*/GET/status/*
+
+  AskPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AskLambda
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${DocumentReaderHttpApi}/*/POST/ask
+
+Outputs:
+  ApiBaseUrl:
+    Description: HTTP API base URL
+    Value: !Sub https://${DocumentReaderHttpApi}.execute-api.${AWS::Region}.amazonaws.com
+
+  UploadBucket:
+    Description: Upload bucket
+    Value: !Ref S3BucketName
+
+  ManifestPrefix:
+    Description: Manifest prefix
+    Value: chatbot-manifests/
+
+  StorePrefix:
+    Description: Chunk prefix
+    Value: chatbot-store/

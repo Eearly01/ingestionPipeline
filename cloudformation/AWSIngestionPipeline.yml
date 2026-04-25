@@ -272,6 +272,8 @@ Resources:
       Enabled: true
       EventSourceArn: !GetAtt PortfolioQueue.Arn
       FunctionName: !Ref ProcessorLambda
+      FunctionResponseTypes:
+        - ReportBatchItemFailures
 
   CleanupRole:
     Type: AWS::IAM::Role
