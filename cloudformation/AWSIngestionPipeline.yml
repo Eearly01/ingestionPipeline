@@ -1,0 +1,388 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  AWS Ingester portfolio-safe ingestion pipeline for chatbot-ready storage.
+  Default design avoids always-on search and paid AI services, uses S3 + Lambda + SQS,
+  and deletes demo data after 2 hours.
+
+Parameters:
+  S3BucketName:
+    Type: String
+    Default: ingester-pipeline-eearly-demo
+    Description: Bucket used for raw uploads and chatbot-ready output.
+  QueueName:
+    Type: String
+    Default: IngesterPipelineQueue
+  ObjectRetentionHours:
+    Type: Number
+    Default: 2
+    MinValue: 1
+    MaxValue: 24
+    Description: How long demo objects remain before cleanup.
+  CleanupScheduleExpression:
+    Type: String
+    Default: rate(30 minutes)
+    Description: EventBridge schedule for cleanup.
+
+Resources:
+  IngesterBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: QueueIngressPermission
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Ref S3BucketName
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: AbortIncompleteMultipartUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          - Id: HardDeleteRemainingObjectsAfterOneDay
+            Status: Enabled
+            ExpirationInDays: 1
+      NotificationConfiguration:
+        LambdaConfigurations:
+          - Event: s3:ObjectCreated:*
+            Function: !GetAtt QueueIngressLambda.Arn
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: uploads/
+
+  PortfolioQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Ref QueueName
+      VisibilityTimeout: 120
+      MessageRetentionPeriod: 7200
+      SqsManagedSseEnabled: true
+
+  QueueIngressRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: QueueIngressPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt PortfolioQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  QueueIngressLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt QueueIngressRole.Arn
+      Timeout: 30
+      MemorySize: 128
+      Environment:
+        Variables:
+          QUEUE_URL: !Ref PortfolioQueue
+      Code:
+        ZipFile: |
+          import boto3, json, os, urllib.parse
+
+          sqs = boto3.client("sqs")
+
+          def lambda_handler(event, context):
+              for record in event.get("Records", []):
+                  bucket = record["s3"]["bucket"]["name"]
+                  key = urllib.parse.unquote_plus(record["s3"]["object"]["key"])
+                  if not key.startswith("uploads/"):
+                      continue
+                  body = json.dumps({"bucket": bucket, "key": key})
+                  sqs.send_message(QueueUrl=os.environ["QUEUE_URL"], MessageBody=body)
+              return {"statusCode": 200}
+
+  QueueIngressPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref QueueIngressLambda
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !Sub arn:aws:s3:::${S3BucketName}
+
+  ProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:PutObjectTagging
+                Resource: !Sub arn:aws:s3:::${S3BucketName}/*
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt PortfolioQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  ProcessorLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt ProcessorRole.Arn
+      Timeout: 60
+      MemorySize: 256
+      Environment:
+        Variables:
+          OUTPUT_BUCKET: !Ref S3BucketName
+          RETENTION_HOURS: !Ref ObjectRetentionHours
+      Code:
+        ZipFile: |
+          import boto3, json, os
+          from datetime import datetime, timedelta, timezone
+
+          s3 = boto3.client("s3")
+          MAX_CHUNK_CHARS = 1200
+
+          def _read_text(bucket, key):
+              data = s3.get_object(Bucket=bucket, Key=key)["Body"].read().decode("utf-8", errors="ignore")
+              if key.lower().endswith(".json"):
+                  try:
+                      obj = json.loads(data)
+                      if isinstance(obj, dict):
+                          return json.dumps(obj, indent=2)
+                  except Exception:
+                      pass
+              return data
+
+          def _chunk_text(text, max_chars=MAX_CHUNK_CHARS):
+              text = "\n".join(line.rstrip() for line in text.splitlines()).strip()
+              if not text:
+                  return []
+              paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+              chunks, current = [], ""
+              for paragraph in paragraphs:
+                  candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+                  if len(candidate) <= max_chars:
+                      current = candidate
+                  else:
+                      if current:
+                          chunks.append(current)
+                      while len(paragraph) > max_chars:
+                          chunks.append(paragraph[:max_chars])
+                          paragraph = paragraph[max_chars:]
+                      current = paragraph
+              if current:
+                  chunks.append(current)
+              return chunks
+
+          def lambda_handler(event, context):
+              retention_hours = int(os.environ.get("RETENTION_HOURS", "2"))
+              expires_at = (datetime.now(timezone.utc) + timedelta(hours=retention_hours)).isoformat()
+              output_bucket = os.environ["OUTPUT_BUCKET"]
+
+              for record in event.get("Records", []):
+                  payload = json.loads(record["body"])
+                  bucket = payload["bucket"]
+                  key = payload["key"]
+                  raw_text = _read_text(bucket, key)
+                  chunks = _chunk_text(raw_text)
+                  doc_name = key.split("/", 1)[1].rsplit(".", 1)[0].replace("/", "-")
+                  manifest = {
+                      "document_id": doc_name,
+                      "source_key": key,
+                      "chunk_count": len(chunks),
+                      "created_at": datetime.now(timezone.utc).isoformat(),
+                      "expires_at": expires_at,
+                      "retrieval_prefix": f"chatbot-store/{doc_name}/"
+                  }
+
+                  for idx, chunk in enumerate(chunks, start=1):
+                      out_key = f"chatbot-store/{doc_name}/chunk-{idx:04d}.json"
+                      body = {
+                          "document_id": doc_name,
+                          "chunk_id": f"{doc_name}-{idx:04d}",
+                          "source_key": key,
+                          "chunk_number": idx,
+                          "text": chunk,
+                          "expires_at": expires_at
+                      }
+                      s3.put_object(
+                          Bucket=output_bucket,
+                          Key=out_key,
+                          Body=json.dumps(body).encode("utf-8"),
+                          ContentType="application/json",
+                          ServerSideEncryption="AES256",
+                          Tagging="autodelete=true"
+                      )
+
+                  manifest_key = f"chatbot-manifests/{doc_name}.json"
+                  s3.put_object(
+                      Bucket=output_bucket,
+                      Key=manifest_key,
+                      Body=json.dumps(manifest).encode("utf-8"),
+                      ContentType="application/json",
+                      ServerSideEncryption="AES256",
+                      Tagging="autodelete=true"
+                  )
+              return {"statusCode": 200}
+
+  ProcessorEventSourceMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 1
+      Enabled: true
+      EventSourceArn: !GetAtt PortfolioQueue.Arn
+      FunctionName: !Ref ProcessorLambda
+
+  CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CleanupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${S3BucketName}
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub arn:aws:s3:::${S3BucketName}/*
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: '*'
+
+  CleanupLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt CleanupRole.Arn
+      Timeout: 60
+      MemorySize: 128
+      Environment:
+        Variables:
+          TARGET_BUCKET: !Ref S3BucketName
+          RETENTION_HOURS: !Ref ObjectRetentionHours
+      Code:
+        ZipFile: |
+          import boto3, os
+          from datetime import datetime, timedelta, timezone
+
+          s3 = boto3.client("s3")
+          PREFIXES = ("uploads/", "chatbot-store/", "chatbot-manifests/")
+
+          def lambda_handler(event, context):
+              bucket = os.environ["TARGET_BUCKET"]
+              retention_hours = int(os.environ.get("RETENTION_HOURS", "2"))
+              cutoff = datetime.now(timezone.utc) - timedelta(hours=retention_hours)
+              deleted = []
+
+              for prefix in PREFIXES:
+                  paginator = s3.get_paginator("list_objects_v2")
+                  for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                      for obj in page.get("Contents", []):
+                          if obj["LastModified"] < cutoff:
+                              s3.delete_object(Bucket=bucket, Key=obj["Key"])
+                              deleted.append(obj["Key"])
+              return {"deleted_count": len(deleted), "deleted": deleted[:25]}
+
+  CleanupScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      ScheduleExpression: !Ref CleanupScheduleExpression
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt CleanupLambda.Arn
+          Id: CleanupLambdaTarget
+
+  CleanupPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CleanupLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt CleanupScheduleRule.Arn
+
+  QueueIngressLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${QueueIngressLambda}
+      RetentionInDays: 1
+
+  ProcessorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${ProcessorLambda}
+      RetentionInDays: 1
+
+  CleanupLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${CleanupLambda}
+      RetentionInDays: 1
+
+Outputs:
+  DemoBucket:
+    Description: Upload .txt, .md, or .json files to uploads/
+    Value: !Ref S3BucketName
+  QueueUrl:
+    Value: !Ref PortfolioQueue
+  ChatbotStorePrefix:
+    Description: Chunked chatbot-ready files land here
+    Value: chatbot-store/
+  ManifestPrefix:
+    Description: Document manifests land here
+    Value: chatbot-manifests/
