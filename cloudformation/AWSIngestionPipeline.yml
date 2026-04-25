@@ -22,6 +22,10 @@ Parameters:
     Type: String
     Default: rate(30 minutes)
     Description: EventBridge schedule for cleanup.
+  AllowedWebOrigin:
+    Type: String
+    Default: https://eearlyawsdocingestion.netlify.app
+    Description: Frontend origin allowed to upload directly to S3. Use http://localhost:5173 for local testing.
 
 Resources:
   IngesterBucket:
@@ -40,6 +44,21 @@ Resources:
         ServerSideEncryptionConfiguration:
           - ServerSideEncryptionByDefault:
               SSEAlgorithm: AES256
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - !Ref AllowedWebOrigin
+            AllowedMethods:
+              - PUT
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - content-type
+              - x-amz-*
+              - authorization
+            ExposedHeaders:
+              - ETag
+            MaxAge: 300
       LifecycleConfiguration:
         Rules:
           - Id: AbortIncompleteMultipartUploads
@@ -225,7 +244,10 @@ Resources:
                   key = payload["key"]
                   raw_text = _read_text(bucket, key)
                   chunks = _chunk_text(raw_text)
-                  doc_name = key.split("/", 1)[1].rsplit(".", 1)[0].replace("/", "-")
+                  parts = key.split("/")
+                  # Presign API uploads to uploads/{documentId}/{filename}.
+                  # Keep the manifest id equal to the frontend documentId.
+                  doc_name = parts[1] if len(parts) >= 3 and parts[0] == "uploads" else key.split("/", 1)[1].rsplit(".", 1)[0].replace("/", "-")
                   manifest = {
                       "document_id": doc_name,
                       "source_key": key,

@@ -1,7 +1,18 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  API layer for AWSSherpa / Ingester document reader demo. This stack connects
+  a Netlify React frontend to the existing ingestion S3 bucket using presigned
+  uploads, status polling, and Bedrock-powered document Q&A.
+
 Parameters:
+  S3BucketName:
+    Type: String
+    Description: Existing S3 bucket from the ingestion pipeline stack.
+
   AllowedWebOrigin:
     Type: String
-    Description: Netlify site origin https://eearlyawsdocingestion.netlify.app
+    Default: https://eearlyawsdocingestion.netlify.app
+    Description: Netlify site origin allowed by API Gateway CORS.
 
   PresignExpiresSeconds:
     Type: Number
@@ -9,33 +20,19 @@ Parameters:
 
   BedrockModelIdOrProfileArn:
     Type: String
-    Description: Bedrock model ID or application inference profile ARN
+    Default: anthropic.claude-3-haiku-20240307-v1:0
+    Description: Bedrock model ID or application inference profile ARN used by AskLambda.
 
   BedrockInvokeResourceArn:
     Type: String
-    Description: Exact model ARN or inference-profile ARN allowed for InvokeModel
+    Default: '*'
+    Description: IAM resource scope for Bedrock invoke. Use * for simple demo, or a model/profile ARN for stricter access.
 
 Resources:
-  IngesterBucket:
-    Type: AWS::S3::Bucket
-    Properties:
-      CorsConfiguration:
-        CorsRules:
-          - AllowedOrigins:
-              - !Ref AllowedWebOrigin
-            AllowedMethods:
-              - PUT
-            AllowedHeaders:
-              - content-type
-              - x-amz-*
-            ExposedHeaders:
-              - ETag
-            MaxAge: 300
-
   DocumentReaderHttpApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: document-reader-api
+      Name: aws-document-reader-api
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:
@@ -66,7 +63,8 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: { Service: lambda.amazonaws.com }
+            Principal:
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: PresignPolicy
@@ -91,7 +89,8 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: { Service: lambda.amazonaws.com }
+            Principal:
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: StatusPolicy
@@ -116,7 +115,8 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: { Service: lambda.amazonaws.com }
+            Principal:
+              Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       Policies:
         - PolicyName: AskPolicy
@@ -132,7 +132,6 @@ Resources:
               - Effect: Allow
                 Action:
                   - bedrock:InvokeModel
-                  # add bedrock:InvokeModelWithResponseStream if/when you enable streaming
                 Resource: !Ref BedrockInvokeResourceArn
               - Effect: Allow
                 Action:
@@ -144,8 +143,8 @@ Resources:
   PresignLambda:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: nodejs22.x
-      Handler: index.handler
+      Runtime: python3.13
+      Handler: index.lambda_handler
       Role: !GetAtt PresignRole.Arn
       Timeout: 15
       MemorySize: 128
@@ -155,14 +154,35 @@ Resources:
           UPLOAD_PREFIX: uploads/
           PRESIGN_EXPIRES_SECONDS: !Ref PresignExpiresSeconds
       Code:
-        S3Bucket: your-artifact-bucket
-        S3Key: presign-lambda.zip
+        ZipFile: |
+          import json, os, re, uuid, boto3
+          s3 = boto3.client('s3')
+
+          def response(status, body):
+              return {'statusCode': status, 'headers': {'content-type':'application/json'}, 'body': json.dumps(body)}
+
+          def lambda_handler(event, context):
+              body = json.loads(event.get('body') or '{}')
+              filename = body.get('filename') or 'document.txt'
+              content_type = body.get('contentType') or 'text/plain'
+              allowed = ('.txt', '.md', '.csv', '.json')
+              if not filename.lower().endswith(allowed):
+                  return response(400, {'error': 'Only .txt, .md, .csv, and .json files are supported for this demo.'})
+              safe_name = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
+              document_id = str(uuid.uuid4())
+              key = f"{os.environ.get('UPLOAD_PREFIX','uploads/')}{document_id}/{safe_name}"
+              url = s3.generate_presigned_url(
+                  'put_object',
+                  Params={'Bucket': os.environ['UPLOAD_BUCKET'], 'Key': key, 'ContentType': content_type},
+                  ExpiresIn=int(os.environ.get('PRESIGN_EXPIRES_SECONDS', '300'))
+              )
+              return response(200, {'documentId': document_id, 'objectKey': key, 'uploadUrl': url, 'uploadHeaders': {'Content-Type': content_type}})
 
   StatusLambda:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: nodejs22.x
-      Handler: index.handler
+      Runtime: python3.13
+      Handler: index.lambda_handler
       Role: !GetAtt StatusRole.Arn
       Timeout: 15
       MemorySize: 128
@@ -171,14 +191,34 @@ Resources:
           DOC_BUCKET: !Ref S3BucketName
           MANIFEST_PREFIX: chatbot-manifests/
       Code:
-        S3Bucket: your-artifact-bucket
-        S3Key: status-lambda.zip
+        ZipFile: |
+          import json, os, boto3
+          from botocore.exceptions import ClientError
+          s3 = boto3.client('s3')
+
+          def response(status, body):
+              return {'statusCode': status, 'headers': {'content-type':'application/json'}, 'body': json.dumps(body)}
+
+          def lambda_handler(event, context):
+              document_id = (event.get('pathParameters') or {}).get('documentId')
+              if not document_id:
+                  return response(400, {'error': 'documentId is required'})
+              key = f"{os.environ.get('MANIFEST_PREFIX','chatbot-manifests/')}{document_id}.json"
+              try:
+                  obj = s3.get_object(Bucket=os.environ['DOC_BUCKET'], Key=key)
+                  manifest = json.loads(obj['Body'].read().decode('utf-8'))
+                  return response(200, {'documentId': document_id, 'status': 'ready', 'chunkCount': manifest.get('chunk_count'), 'createdAt': manifest.get('created_at'), 'expiresAt': manifest.get('expires_at')})
+              except ClientError as e:
+                  code = e.response.get('Error', {}).get('Code')
+                  if code in ('NoSuchKey', '404', 'NotFound'):
+                      return response(200, {'documentId': document_id, 'status': 'processing'})
+                  raise
 
   AskLambda:
     Type: AWS::Lambda::Function
     Properties:
-      Runtime: nodejs22.x
-      Handler: index.handler
+      Runtime: python3.13
+      Handler: index.lambda_handler
       Role: !GetAtt AskRole.Arn
       Timeout: 30
       MemorySize: 512
@@ -186,12 +226,57 @@ Resources:
         Variables:
           DOC_BUCKET: !Ref S3BucketName
           MANIFEST_PREFIX: chatbot-manifests/
-          CHUNK_PREFIX: chatbot-store/
           MODEL_ID_OR_PROFILE_ARN: !Ref BedrockModelIdOrProfileArn
-          MAX_CONTEXT_TOKENS: '12000'
       Code:
-        S3Bucket: your-artifact-bucket
-        S3Key: ask-lambda.zip
+        ZipFile: |
+          import json, os, boto3
+          s3 = boto3.client('s3')
+          bedrock = boto3.client('bedrock-runtime')
+
+          def response(status, body):
+              return {'statusCode': status, 'headers': {'content-type':'application/json'}, 'body': json.dumps(body)}
+
+          def get_json(bucket, key):
+              obj = s3.get_object(Bucket=bucket, Key=key)
+              return json.loads(obj['Body'].read().decode('utf-8'))
+
+          def lambda_handler(event, context):
+              body = json.loads(event.get('body') or '{}')
+              document_id = body.get('documentId')
+              question = (body.get('question') or '').strip()
+              if not document_id or not question:
+                  return response(400, {'error': 'documentId and question are required'})
+
+              bucket = os.environ['DOC_BUCKET']
+              manifest_key = f"{os.environ.get('MANIFEST_PREFIX','chatbot-manifests/')}{document_id}.json"
+              manifest = get_json(bucket, manifest_key)
+              prefix = manifest.get('retrieval_prefix', f'chatbot-store/{document_id}/')
+              chunk_count = int(manifest.get('chunk_count', 0))
+              if chunk_count == 0:
+                  return response(200, {'documentId': document_id, 'answer': 'The uploaded document did not contain readable text.'})
+
+              chunks = []
+              for i in range(1, min(chunk_count, 10) + 1):
+                  chunk = get_json(bucket, f'{prefix}chunk-{i:04d}.json')
+                  chunks.append(chunk)
+
+              context_text = '\n\n'.join([f"[Chunk {c.get('chunk_number')}] {c.get('text','')}" for c in chunks])
+              prompt = f"""You are an AI document reader. Answer only from the document context below.
+          If the answer is not present in the document, say: I could not find that in the uploaded document.
+
+          Document context:
+          {context_text}
+
+          User question:
+          {question}"""
+
+              result = bedrock.converse(
+                  modelId=os.environ['MODEL_ID_OR_PROFILE_ARN'],
+                  messages=[{'role': 'user', 'content': [{'text': prompt}]}],
+                  inferenceConfig={'maxTokens': 600, 'temperature': 0.2}
+              )
+              answer = ''.join([p.get('text','') for p in result.get('output', {}).get('message', {}).get('content', [])]).strip()
+              return response(200, {'documentId': document_id, 'answer': answer, 'usage': result.get('usage'), 'chunksUsed': [c.get('chunk_number') for c in chunks]})
 
   PresignIntegration:
     Type: AWS::ApiGatewayV2::Integration
@@ -270,17 +355,8 @@ Resources:
 
 Outputs:
   ApiBaseUrl:
-    Description: HTTP API base URL
+    Description: HTTP API base URL. Use this as VITE_API_BASE_URL in Netlify.
     Value: !Sub https://${DocumentReaderHttpApi}.execute-api.${AWS::Region}.amazonaws.com
-
   UploadBucket:
-    Description: Upload bucket
+    Description: Existing ingestion bucket used by this API stack.
     Value: !Ref S3BucketName
-
-  ManifestPrefix:
-    Description: Manifest prefix
-    Value: chatbot-manifests/
-
-  StorePrefix:
-    Description: Chunk prefix
-    Value: chatbot-store/

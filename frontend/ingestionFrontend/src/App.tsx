@@ -19,7 +19,15 @@ export default function App() {
 
   const ready = status === "ready";
 
+  
   async function handleUpload() {
+
+    if (!API_BASE) {
+      setStatus("error");
+      setErrorMessage("Missing VITE_API_BASE_URL environment variable.");
+    return;
+    }
+
     if (!file) return;
     setStatus("requesting-upload");
     setErrorMessage("");
