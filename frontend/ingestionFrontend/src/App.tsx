@@ -8,6 +8,7 @@ const strengths = [
   'Signals monitoring and adversary detection (U.S. Army 17E)',
   'AWS & GCP cloud security, IAM, and infrastructure-as-code',
   'Log analysis, SIEM-style pipelines, and event correlation',
+  'CI/CD security, IaC hardening, and shift-left practices',
   'Software engineering precision applied to detection and response',
 ]
  
@@ -44,13 +45,21 @@ const focusAreas = [
       'Comfortable bridging detection engineers, developers, and SOC analysts',
     ],
   },
+  {
+    title: 'DevSecOps & Secure Delivery',
+    items: [
+      'IaC security hardening with CloudFormation and Terraform — least-privilege IAM, encrypted resources, and locked-down VPCs baked into templates',
+      'CI/CD pipeline integration: security gates, secrets scanning, and policy enforcement as code',
+      'Shift-left mindset: security requirements addressed at design time, not after deployment',
+    ],
+  },
 ]
  
 const experience = [
   {
     role: 'Electronic Warfare Specialist (17E)',
     org: 'U.S. Army National Guard',
-    dates: 'Jan 2025 – Present  ·  AIT: Nov 2025 – Present',
+    dates: 'Feb 2025 – Present',
     meta: 'TS/SCI Cleared · Signals intelligence · OPSEC · SCIF operations',
     bullets: [
       'Trained in electromagnetic spectrum operations, signals intelligence, and adversary detection — directly applicable to network traffic analysis and threat hunting.',
@@ -132,6 +141,29 @@ const projects = [
     tags: ['TypeScript', 'LLM Routing', 'Automation', 'Playbooks'],
   },
 ]
+
+const handsOnSecurity = [
+  {
+    title: 'TryHackMe — SOC Level 1 Path',
+    description:
+      'Working through the SOC Level 1 learning path covering SIEM fundamentals, network analysis with Wireshark and tcpdump, endpoint investigation, threat intelligence, and incident response playbooks.',
+    link: 'https://tryhackme.com/p/elijah.early',
+    linkLabel: 'TryHackMe Profile',
+    tags: ['SIEM', 'Network Analysis', 'Incident Response'],
+  },
+  {
+    title: 'MITRE ATT&CK Mapping — EW to Cyber',
+    description:
+      'Self-directed exercise mapping adversary detection patterns from 17E electromagnetic spectrum operations to MITRE ATT&CK techniques in the Reconnaissance, Initial Access, and Command & Control tactics — bridging signals analysis tradecraft with cyber threat hunting.',
+    tags: ['MITRE ATT&CK', 'Threat Hunting', 'Detection'],
+  },
+  {
+    title: 'Home SIEM Lab — Splunk + Sysmon',
+    description:
+      'Built a personal detection lab ingesting Windows Sysmon and Zeek logs into Splunk, writing custom detection rules for credential dumping, lateral movement, and suspicious PowerShell execution.',
+    tags: ['Splunk', 'Sysmon', 'Detection Engineering'],
+  },
+]
  
 const education = [
   {
@@ -151,9 +183,9 @@ const education = [
 ]
  
 const certifications = [
-  'CompTIA Security+',
-  'CompTIA CySA+',
-  'Software Engineering Immersive — General Assembly',
+  'CompTIA Security+ — DoD 8140/8570 IAT Level II',
+  'CompTIA CySA+ — DoD 8140/8570 IAT Level II',
+  'FCC Amateur Radio Technician License',
 ]
  
 function App() {
@@ -161,18 +193,19 @@ function App() {
     <main className="portfolio">
       <header className="hero">
         <div className="hero-copy">
-          <p className="eyebrow">SOC Analyst · Cybersecurity Analyst · TS/SCI · Security+ · CySA+</p>
+          <p className="eyebrow">SOC Analyst · DevSecOps · Cybersecurity Analyst · TS/SCI · Security+ · CySA+</p>
           <h1>
             I bring a software engineer’s precision to threat detection,
-            log analysis, and incident response.
+            secure delivery, and incident response.
           </h1>
           <p className="intro">
-            Security-focused analyst with an active TS/SCI clearance, CompTIA Security+
-            and CySA+ certifications, and hands-on experience building data pipelines,
-            cloud infrastructure, and AI-driven systems on AWS and GCP. Trained as a
+            Security-focused engineer with an active TS/SCI clearance, CompTIA Security+
+            and CySA+ certifications, and production experience building cloud infrastructure,
+            event-driven data pipelines, and AI-driven systems on AWS and GCP. Trained as a
             U.S. Army 17E Electronic Warfare Specialist in signals monitoring,
-            adversary detection, and SCIF-based operations — with the clearance to
-            work where most entry-level candidates cannot.
+            adversary detection, and SCIF-based operations. Whether in a SOC or a DevSecOps
+            role, I can read logs, investigate access issues, harden pipelines and IaC, and
+            communicate across security and engineering teams from day one.
           </p>
  
           <div className="hero-highlights">
@@ -181,6 +214,7 @@ function App() {
             <span>CySA+</span>
             <span>U.S. Army 17E</span>
             <span>AWS &amp; GCP</span>
+            <span>DevSecOps</span>
           </div>
  
           <div className="hero-actions">
@@ -188,7 +222,7 @@ function App() {
               className="button primary"
               href={resumeUrl}
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
             >
               View Resume
             </a>
@@ -202,7 +236,7 @@ function App() {
               className="button secondary"
               href="https://www.linkedin.com/in/elijah-early/"
               target="_blank"
-              rel="noreferrer"
+              rel="noopener noreferrer"
             >
               LinkedIn
             </a>
@@ -214,15 +248,16 @@ function App() {
       <section className="section summary">
         <div className="section-header">
           <span className="section-tag">Why me</span>
-          <h2>A cleared analyst with a builder’s toolkit</h2>
+          <h2>A cleared engineer with a security-first mindset</h2>
         </div>
         <p>
           Most entry-level candidates understand security theory. I pair that
           mindset with an active TS/SCI clearance, two CompTIA certifications,
           and production experience building cloud infrastructure, log and
-          event pipelines, and AI-driven systems. I can read logs, follow
-          application behavior, investigate access issues, communicate with
-          developers, and contribute to practical remediation from day one.
+          event pipelines, and AI-driven systems. Whether the role is SOC or
+          DevSecOps, I can read logs, investigate access issues, harden IaC and
+          CI/CD pipelines, communicate across security and engineering teams, and
+          contribute to practical remediation from day one.
         </p>
  
         <ul className="pill-list">
@@ -235,7 +270,7 @@ function App() {
       <section className="section">
         <div className="section-header">
           <span className="section-tag">Focus</span>
-          <h2>What I bring to a SOC or cybersecurity analyst role</h2>
+          <h2>What I bring to a SOC, cybersecurity, or DevSecOps role</h2>
         </div>
  
         <div className="grid-list">
@@ -301,7 +336,43 @@ function App() {
           ))}
         </div>
       </section>
- 
+
+      <section className="section">
+        <div className="section-header">
+          <span className="section-tag">Hands-On</span>
+          <h2>Defensive security practice</h2>
+        </div>
+
+        <div className="grid-list">
+          {handsOnSecurity.map((item) => (
+            <article className="card project-card" key={item.title}>
+              <h3>{item.title}</h3>
+              <p>{item.description}</p>
+              {item.link && (
+                <p style={{ marginTop: 8 }}>
+                  <a
+                    href={item.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{ color: 'var(--accent)', fontWeight: 600 }}
+                  >
+                    {item.linkLabel} →
+                  </a>
+                </p>
+              )}
+              <div className="tag-row">
+                {item.tags.map((tag) => (
+                  <span key={tag} className="mini-tag">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+      
+      
       <section className="section grid-list">
         <article className="card">
           <h3>Tools &amp; technologies</h3>
@@ -316,7 +387,6 @@ function App() {
  
         <article className="card">
           <h3>Certifications</h3>
-          <p style={{ marginBottom: 14 }}>Certifications</p>
           <ul>
             {certifications.map((cert) => (
               <li key={cert}>{cert}</li>
@@ -352,22 +422,22 @@ function App() {
           <h2>Let’s connect</h2>
         </div>
         <p>
-          I’m looking for SOC and cybersecurity analyst opportunities where I
-          can apply my clearance, certifications, and cloud + engineering
-          background to defend systems, investigate incidents, and improve
-          detection and response.
+          I’m looking for SOC analyst, cybersecurity analyst, and DevSecOps
+          opportunities where I can apply my TS/SCI clearance, CompTIA
+          certifications, and cloud + engineering background to defend systems,
+          harden pipelines, investigate incidents, and improve detection and response.
         </p>
  
         <div className="contact-list">
           <a href="mailto:elijah.early@gmail.com">elijah.early@gmail.com</a>
           <a href="tel:8172336608">817.233.6608</a>
-          <a href="https://github.com/eearly01" target="_blank" rel="noreferrer">
+          <a href="https://github.com/eearly01" target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
           <a
             href="https://www.linkedin.com/in/elijah-early/"
             target="_blank"
-            rel="noreferrer"
+            rel="noopener noreferrer"
           >
             LinkedIn
           </a>
